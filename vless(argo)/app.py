@@ -244,7 +244,7 @@ def show_vless(u, host):
 def show_hy2(u, pin):
     host = public_ip()
     link = (f"hysteria2://{u}@{host}:{HY2_PORT}/?sni=bing.com"
-            f"&insecure=1&alpn=h3&pinSHA256={quote(pin)}#{quote('hy2-argo')}")
+            f"&insecure=1&alpn=h3&pinSHA256={quote(pin)}#{quote('hy2')}")
     print("\n" + "=" * 72)
     print(f"  [HY2] 地址   : {host}:{HY2_PORT}  (需放行 UDP)")
     print(f"  [HY2] 密码   : {u}")
