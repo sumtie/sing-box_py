@@ -1,25 +1,17 @@
-"""
-提示词:
-编写Python代码app.py和requirements，https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64-musl.tar.gz 部署在Python主机上，部署tuic和anytls协议节点，共用一个端口(用户填写)，共用密码(用户填写或自动生成)，openssl无法使用，只能Python库自签证书。app.py同目录下创建.tmp文件夹，二进制、节点链接等文件统一放进去
-"""
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 app.py — 在 Python 主机上一键部署 sing-box（TUIC + AnyTLS 同端口共存）
 
 要点：
-  * TUIC 走 UDP(QUIC)、AnyTLS 走 TCP，两者可绑定同一端口号，互不冲突。
+  * TUIC 走 UDP(QUIC)、AnyTLS 走 TCP，两者绑定同一端口号，互不冲突。
   * 证书用 cryptography 纯 Python 自签，不依赖 openssl 命令行。
   * 所有产物（二进制、配置、证书、节点链接）统一放在脚本同目录的 .tmp/ 下。
 
-用法：
-  python3 app.py --port 443
-  python3 app.py --port 8443 --password 'MyPass' --host vps.example.com
-  python3 app.py --port 443 --check        # 只生成并校验配置，不启动
+配置方式（改下面三个常量，或用同名环境变量）：
+  SERVER_PORT=443 PASSWORD='MyPass' HOST=vps.example.com python3 app.py
 """
 
-import argparse
 import datetime
 import ipaddress
 import json
@@ -41,6 +33,15 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+# --------------------------------------------------------------------------- #
+# 用户配置区
+# --------------------------------------------------------------------------- #
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "0"))  # 0 = 必须手动改或传环境变量
+PASSWORD = os.environ.get("PASSWORD", "")             # 留空自动生成
+HOST = os.environ.get("HOST", "")                     # 留空自动探测公网 IP
+LISTEN = os.environ.get("LISTEN", "::")               # 监听地址，默认双栈
+FORCE = os.environ.get("FORCE", "") not in ("", "0", "false", "False")
 
 DOWNLOAD_URL = (
     "https://github.com/SagerNet/sing-box/releases/download/"
@@ -122,7 +123,6 @@ def download_archive(force=False):
                 f.write(chunk)
                 done += len(chunk)
                 if total:
-                    pct = done * 100 // total
                     print("\r    进度 {:>3}%  {}/{} KB".format(
                         pct, done // 1024, total // 1024), end="", flush=True)
         print()
@@ -153,8 +153,7 @@ def install_binary(force=False):
         if member is None:
             die("压缩包里找不到 sing-box 可执行文件")
 
-        src = Path(workdir) / member.name
-        shutil.copy2(src, BIN_PATH)
+        shutil.copy2(Path(workdir) / member.name, BIN_PATH)
 
     os.chmod(BIN_PATH, 0o755)
 
@@ -360,58 +359,48 @@ def run_server():
 
 # --------------------------------------------------------------------------- #
 def main():
-    parser = argparse.ArgumentParser(
-        description="部署 sing-box（TUIC + AnyTLS 同端口共存）")
-    parser.add_argument("--port", type=int, help="监听端口（TCP 给 AnyTLS，UDP 给 TUIC）")
-    parser.add_argument("--password", help="共用密码，留空则自动生成")
-    parser.add_argument("--host", help="节点域名或 IP，留空自动探测公网 IP")
-    parser.add_argument("--listen", default="::", help="监听地址，默认 ::（双栈）")
-    parser.add_argument("--check", action="store_true", help="只生成并校验配置，不启动")
-    parser.add_argument("--force", action="store_true", help="强制重新下载/重新签证书")
-    args = parser.parse_args()
+    if not SERVER_PORT:
+        die("SERVER_PORT 为 0，请修改脚本顶部常量或设置环境变量 SERVER_PORT")
+    if not (0 < SERVER_PORT < 65536):
+        die("端口非法: {}".format(SERVER_PORT))
 
     ensure_tmp()
     state = load_state()
 
-    port = args.port or state.get("port")
-    if not port:
-        die("请用 --port 指定端口")
-    if not (0 < port < 65536):
-        die("端口非法: {}".format(port))
-
-    password = args.password or state.get("password") or secrets.token_urlsafe(24)
+    password = PASSWORD or state.get("password") or secrets.token_urlsafe(24)
     tuic_uuid = state.get("uuid") or str(uuidlib.uuid4())
 
-    host = args.host or state.get("host")
+    host = HOST or state.get("host")
     if not host:
-        log("未指定 --host，尝试探测公网 IP…")
+        log("未指定 HOST，尝试探测公网 IP…")
         host = detect_public_ip()
         if not host:
-            die("探测公网 IP 失败，请用 --host 指定域名或 IP")
+            die("探测公网 IP 失败，请设置 HOST 为域名或 IP")
         log("探测到公网 IP: {}".format(host))
 
-    save_state({"port": port, "password": password, "uuid": tuic_uuid, "host": host})
+    save_state({"port": SERVER_PORT, "password": password,
+                "uuid": tuic_uuid, "host": host})
 
-    install_binary(force=args.force)
+    install_binary(force=FORCE)
 
-    if args.force or not (CERT_PATH.exists() and KEY_PATH.exists()) \
+    if FORCE or not (CERT_PATH.exists() and KEY_PATH.exists()) \
             or state.get("cert_host") != host:
         make_cert(host)
         state["cert_host"] = host
         save_state(state)
 
-    config = build_server_config(port, password, tuic_uuid, host, args.listen)
+    config = build_server_config(SERVER_PORT, password, tuic_uuid, host, LISTEN)
     write_private(CONFIG_PATH, json.dumps(config, indent=2, ensure_ascii=False))
 
-    tuic_link, anytls_link = build_links(port, password, tuic_uuid, host)
+    tuic_link, anytls_link = build_links(SERVER_PORT, password, tuic_uuid, host)
     write_private(NODES_PATH, "TUIC:\n{}\n\nAnyTLS:\n{}\n".format(tuic_link, anytls_link))
     write_private(CLIENT_CONFIG_PATH,
-                  json.dumps(build_client_config(port, password, tuic_uuid, host),
+                  json.dumps(build_client_config(SERVER_PORT, password, tuic_uuid, host),
                              indent=2, ensure_ascii=False))
 
     log("配置已写入: {}".format(CONFIG_PATH))
-    if port < 1024 and os.geteuid() != 0:
-        log("提示: 端口 {} < 1024，需要 root 权限才能绑定".format(port))
+    if SERVER_PORT < 1024 and os.geteuid() != 0:
+        log("提示: 端口 {} < 1024，需要 root 权限才能绑定".format(SERVER_PORT))
 
     chk = subprocess.run([str(BIN_PATH), "check", "-c", str(CONFIG_PATH)],
                          capture_output=True, text=True)
@@ -420,18 +409,15 @@ def main():
     log("配置校验通过")
 
     print("\n" + "=" * 72)
-    print("  协议: TUIC (UDP) + AnyTLS (TCP)   端口: {}   密码: {}".format(port, password))
+    print("  协议: TUIC (UDP) + AnyTLS (TCP)   端口: {}   密码: {}".format(
+        SERVER_PORT, password))
     print("  服务端 SNI: {}   UUID: {}".format(host, tuic_uuid))
     print("  TUIC  : {}".format(tuic_link))
     print("  AnyTLS: {}".format(anytls_link))
     print("  节点链接文件: {}".format(NODES_PATH))
     print("  客户端配置  : {}".format(CLIENT_CONFIG_PATH))
-    print("  记得放行 TCP 与 UDP {} 端口".format(port))
+    print("  记得放行 TCP 与 UDP {} 端口".format(SERVER_PORT))
     print("=" * 72 + "\n")
-
-    if args.check:
-        log("--check 已指定，不启动服务")
-        return 0
 
     return run_server()
 
